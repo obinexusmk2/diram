@@ -1,115 +1,94 @@
 // ============================================================================
-// src/feature-alloc/cache_lookahead.c - Predictive phenomena for OBINexus DIRAM
+// src/core/feature-alloc/cache_lookahead.c - Predictive phenomena for OBINexus DIRAM
 // ============================================================================
 
 #include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <stddef.h>
 #include "diram/core/diram.h"
-#include "diram/core/diram_phenomenological.h"
-#include "diram/core/feature-alloc/alloc.h"
-
-// Remove the duplicate typedefs - they're already in diram_phenomenological.h
-// Only define helper functions that aren't in the headers
 
 // Helper functions
-static uint32_t detect_pattern_length(phenotype_t* seq, uint32_t len) {
-    // Simple pattern detection stub
-    (void)seq; // Suppress unused warning
-    return len > 4 ? 2 : 0;
-}
-
-static dag_node_t* diram_navigate_dag(diram_context_t* ctx, phenotype_t pheno) {
-    // Navigation stub
-    (void)ctx;   // Suppress unused warning
-    (void)pheno; // Suppress unused warning
-    return NULL;
+static uint32_t detect_pattern_length(const phenotype_t* seq, uint32_t len) {
+    (void)seq;
+    return len > 4 ? 2U : 0U;
 }
 
 static void mark_memory_speculative(void* ptr, size_t size) {
-    // Speculation marker stub
-    (void)ptr; 
+    (void)ptr;
     (void)size;
 }
 
-// Phenomenon predictor structure
 typedef struct {
-    phenotype_t observed_sequence[32];  // Recent phenomena observations
+    phenotype_t observed_sequence[32];
     uint32_t sequence_length;
-    float confidence_scores[32];        // Confidence in each observation
+    float confidence_scores[32];
 } phenomenon_predictor_t;
 
-// Predict next memory phenomenon based on observed patterns
-phenotype_t predict_next_phenomenon(phenomenon_predictor_t* predictor, 
-                                   dag_node_t* current_state) {
-    phenotype_t predicted = {.raw = 0};
-    
-    // Analyze observed sequence for patterns
-    if (predictor->sequence_length >= 3) {
-        // Look for repeating patterns (simple markov chain)
-        uint32_t pattern_length = detect_pattern_length(predictor->observed_sequence,
-                                                       predictor->sequence_length);
-        
-        if (pattern_length > 0) {
-            // Predict based on pattern
+static uint32_t phenotype_weight(const phenotype_t* pheno) {
+    return pheno->semantic_hash;
+}
+
+phenotype_t predict_next_phenomenon(phenomenon_predictor_t* predictor,
+                                    dag_node_t* current_state) {
+    phenotype_t predicted = {0};
+
+    if (!predictor) {
+        return predicted;
+    }
+
+    if (predictor->sequence_length >= 3U) {
+        uint32_t pattern_length = detect_pattern_length(
+            predictor->observed_sequence,
+            predictor->sequence_length
+        );
+
+        if (pattern_length > 0U) {
             uint32_t next_index = predictor->sequence_length % pattern_length;
             predicted = predictor->observed_sequence[next_index];
         }
     }
-    
-    // Weight prediction by DAG edge probabilities
-    float total_probability = 0.0f;
-    phenotype_t weighted_sum = {.raw = 0};
-    
-    for (uint32_t i = 0; i < current_state->edge_count; i++) {
-        dag_edge_t* edge = current_state->edges[i];
-        
-        // Weight each possible next state by its probability
-        uint32_t weighted_pheno = (uint32_t)(edge->trigger.raw * edge->probability);
-        weighted_sum.raw += weighted_pheno;
-        total_probability += edge->probability;
+
+    if (current_state && current_state->child_count > 0U) {
+        uint32_t weighted_sum = 0U;
+        float total_weight = 0.0f;
+
+        for (size_t i = 0; i < current_state->child_count; i++) {
+            dag_node_t* child = current_state->children[i];
+            if (!child) {
+                continue;
+            }
+
+            float weight = child->phenotype.confidence;
+            weighted_sum += (uint32_t)(phenotype_weight(&child->phenotype) * weight);
+            total_weight += weight;
+        }
+
+        if (total_weight > 0.0f) {
+            predicted.semantic_hash = (predicted.semantic_hash / 2U) +
+                                     (weighted_sum / (uint32_t)(total_weight * 2.0f));
+        }
     }
-    
-    if (total_probability > 0.0f) {
-        // Combine pattern prediction with DAG probabilities
-        predicted.raw = (predicted.raw / 2) + 
-                       (weighted_sum.raw / (uint32_t)(total_probability * 2));
-    }
-    
+
     return predicted;
 }
 
-// Prefetch based on predicted phenomena
 int prefetch_by_phenomenon(diram_context_t* ctx, phenotype_t predicted) {
-    // Navigate DAG to predicted state
     dag_node_t* predicted_state = diram_navigate_dag(ctx, predicted);
-    
-    // Use predicted_state for enhanced prefetch decisions
-    size_t prefetch_size = 0;
-    
+    size_t prefetch_size = 1024U;
+
     if (predicted_state != NULL) {
-        // Adjust prefetch based on DAG node stability
-        float stability = predicted_state->stability_score;
-        if (stability > 0.8f && predicted.fields.frequency >= 5) {
-            prefetch_size = 4096;  // High frequency + stable - prefetch more
-        } else if (predicted.fields.locality >= 10) {
-            prefetch_size = 2048;  // High locality - medium prefetch
-        } else {
-            prefetch_size = 1024;  // Default prefetch
+        float stability = predicted_state->phenotype.confidence;
+        if (stability > 0.8f && predicted.signature >= 5U) {
+            prefetch_size = 4096U;
+        } else if (predicted.semantic_hash >= 10U) {
+            prefetch_size = 2048U;
         }
-    } else {
-        // Fallback if DAG navigation fails
-        prefetch_size = 1024;
     }
-    
-    // Perform speculative allocation
+
     void* prefetched = diram_alloc(ctx, prefetch_size, predicted);
-    
     if (prefetched) {
-        // Mark as speculative
         mark_memory_speculative(prefetched, prefetch_size);
         return 0;
     }
-    
+
     return -1;
 }
